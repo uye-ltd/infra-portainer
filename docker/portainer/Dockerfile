@@ -9,7 +9,10 @@
 #
 # This is currently a passthrough — it inherits Portainer's ENTRYPOINT unchanged. It is also the
 # extension point: COPY in custom UI assets, extra binaries, etc. Bump the base tag to upgrade.
-FROM portainer/portainer-ce:2.27.9-alpine
+#
+# The registry is spelled out: CI builds with Buildah, which refuses to resolve short names that
+# aren't in the containers-common shortname alias table (Docker would silently assume docker.io).
+FROM docker.io/portainer/portainer-ce:2.27.9-alpine
 
 LABEL org.opencontainers.image.source="https://github.com/uye-ltd/infra-portainer" \
       org.opencontainers.image.title="uye-portainer" \

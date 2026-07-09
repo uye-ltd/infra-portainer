@@ -49,6 +49,10 @@ make tunnel HOST=user@server   # print SSH tunnel command for the localhost UI
   password-file bind mount would break the deployer's path model. Operator sets it on first login.
 - **`-alpine` base tag.** Gives the image a shell + `wget` for the compose healthcheck; the default
   Portainer image is distroless.
+- **Base image must be registry-qualified.** `docker.io/portainer/portainer-ce`, not
+  `portainer/portainer-ce`. CI builds with Buildah, which only resolves short names that appear in
+  the `containers-common` shortname alias table (`alpine` is there; namespaced third-party images
+  are not).
 - **GHCR package must be public** — the deployer's GitHub-App token cannot pull private packages.
 
 ## GitHub Actions secrets required
