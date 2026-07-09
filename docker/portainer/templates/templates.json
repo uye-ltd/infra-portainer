@@ -1,0 +1,16 @@
+{
+  "version": "3",
+  "templates": [
+    {
+      "type": 1,
+      "title": "Example — Nginx",
+      "description": "Example App Template. Edit docker/portainer/templates/templates.json and push; Portainer reloads it from PORTAINER_TEMPLATES_URL — no image rebuild needed.",
+      "categories": ["webserver"],
+      "platform": "linux",
+      "logo": "https://raw.githubusercontent.com/portainer/portainer/develop/app/assets/images/logos/nginx.png",
+      "image": "nginx:alpine",
+      "ports": ["8080:80/tcp"],
+      "restart_policy": "unless-stopped"
+    }
+  ]
+}

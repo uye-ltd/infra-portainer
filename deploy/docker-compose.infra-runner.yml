@@ -1,0 +1,17 @@
+# Overlay for infra-runner's deployer service.
+#
+# Mounts the infra-portainer workspace and plugin descriptor into the deployer container so:
+#   - run_plugins() can find and process the portainer descriptor
+#   - docker compose can update the portainer service in-place
+#
+# Activate by adding to infra-runner's .env:
+#   COMPOSE_FILE=docker-compose.yml:../infra-portainer/deploy/docker-compose.infra-runner.yml
+#
+# Prerequisites (also in infra-runner's .env):
+#   PORTAINER_DIR=/home/ghrunner/infra-portainer
+#   PORTAINER_CERT_IDENTITY=https://github.com/uye-ltd/infra-portainer/.github/workflows/ci.yml@refs/heads/main
+services:
+  deployer:
+    volumes:
+      - ${PORTAINER_DIR}:/workspace-portainer:ro
+      - ${PORTAINER_DIR}/deploy/.infra-runner.plugin:/plugins/portainer.plugin:ro

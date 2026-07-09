@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'docker/**'
+      - '.github/workflows/**'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Validate Compose file
+        # `config` fully parses/interpolates the compose file and errors on anything invalid.
+        run: docker compose -f docker/docker-compose.yml config >/dev/null
+
+      - name: Validate App Templates JSON
+        run: |
+          jq empty docker/portainer/templates/templates.json
+          echo "templates.json is valid JSON"
+
+  build:
+    name: Build, push, and sign portainer image
+    needs: validate
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, linux, x64]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # required for cosign OIDC keyless signing
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Buildah storage
+        run: |
+          # containers/storage requires runRoot when graphRoot is explicitly set.
+          # The runner image bakes graphRoot=/kaniko but omits runRoot, which
+          # causes "runroot must be set" at library init before CLI flags apply.
+          printf '[storage]\n  driver = "overlay"\n  graphRoot = "/kaniko"\n  runRoot = "/tmp/buildah-run"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
+            > /etc/containers/storage.conf
+
+      - name: Build and push with Buildah
+        id: build
+        run: |
+          IMAGE=ghcr.io/uye-ltd/portainer
+          buildah build \
+            --file docker/portainer/Dockerfile \
+            --tag "${IMAGE}:latest" \
+            --tag "${IMAGE}:${{ github.sha }}" \
+            --isolation=chroot \
+            docker/portainer
+          buildah push --digestfile /tmp/digest.txt "${IMAGE}:latest"
+          buildah push "${IMAGE}:${{ github.sha }}"
+          echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Sign image
+        run: |
+          cosign sign --yes \
+            --registry-username "${{ github.actor }}" \
+            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
+            "ghcr.io/uye-ltd/portainer@${{ steps.build.outputs.digest }}"

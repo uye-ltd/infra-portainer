@@ -1,0 +1,19 @@
+# Plugin descriptor for infra-runner's generic deployer.
+# Sourced as shell — variables expand from the deployer's environment at load time.
+# See infra-runner/deployer/PLUGINS.md for the full format reference.
+
+PLUGIN_NAME=portainer
+PLUGIN_IMAGE=ghcr.io/${GITHUB_ORG}/portainer:latest
+PLUGIN_CERT_IDENTITY=${PORTAINER_CERT_IDENTITY}
+PLUGIN_COMPOSE_PROJECT=infra-portainer
+# Points at the docker/ subdir, which holds docker-compose.yml AND (on the server) .env.
+# The deployer runs `docker compose --project-directory <this> up` with no -f/--env-file,
+# so Compose must discover the compose file here and load docker/.env.
+PLUGIN_COMPOSE_DIR=/workspace-portainer/docker
+# Only the portainer service is updated (`up -d --no-deps portainer`). The portainer-proxy
+# sidecar and portainer-net are brought up once by `make up`/bootstrap and left untouched.
+PLUGIN_COMPOSE_SERVICE=portainer
+
+# No post-deploy hook: custom App Templates sync via PORTAINER_TEMPLATES_URL, so nothing extra
+# needs to run each cycle. To add one, see PLUGIN_POST_DEPLOY_* in PLUGINS.md (e.g. a script that
+# provisions endpoints/stacks through the Portainer API).

@@ -1,0 +1,80 @@
+name: infra-portainer  # explicit project name pins volume/network names regardless of checkout directory
+
+services:
+  portainer:
+    # Our own wrapper image (FROM portainer/portainer-ce) — built + cosign-signed in CI so the
+    # infra-runner deployer can verify it. build: is used only for the local first-run bootstrap;
+    # on the server the deployer pulls the signed GHCR image.
+    image: ghcr.io/uye-ltd/portainer:latest
+    build:
+      context: ./portainer
+    container_name: portainer
+    restart: unless-stopped
+    # -H tcp://portainer-proxy:2375 → manage Docker through the socket-proxy instead of mounting
+    #   the raw socket. --templates loads custom App Templates from a URL (empty = built-in list).
+    #   PORTAINER_EXTRA_ARGS is an escape hatch for any additional flags (edge, logging, etc.).
+    # NOTE: this service must declare NO host bind mounts — the deployer runs `docker compose
+    #   --project-directory <dir> --no-deps portainer up` and relative bind paths would resolve to
+    #   the deployer container's filesystem, not the host. Config comes via .env; state via a named volume.
+    command: -H tcp://portainer-proxy:2375 --templates ${PORTAINER_TEMPLATES_URL:-} ${PORTAINER_EXTRA_ARGS:-}
+    ports:
+      - "127.0.0.1:${PORTAINER_HTTP_PORT:-9000}:9000"  # HTTP UI, localhost only; TLS via SSH tunnel / external reverse proxy
+      # - "127.0.0.1:${PORTAINER_HTTPS_PORT:-9443}:9443"  # optional: Portainer's built-in self-signed HTTPS
+      # - "${PORTAINER_EDGE_PORT:-8000}:8000"             # optional: Edge agent tunnel (needs to be reachable by remote agents)
+    volumes:
+      - portainer-data:/data
+    depends_on:
+      - portainer-proxy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9000/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - portainer-net
+
+  portainer-proxy:
+    # Read-limited Docker API gateway (same image + pinned digest infra-runner uses). Portainer
+    # talks to this instead of mounting /var/run/docker.sock directly. Brought up once by
+    # `make up` / bootstrap.sh and never touched by the deployer (which only updates `portainer`).
+    image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+    container_name: portainer-proxy
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Enabled: the management surface Portainer needs to list/inspect/start/stop/deploy.
+      CONTAINERS: 1
+      IMAGES:     1
+      NETWORKS:   1
+      VOLUMES:    1
+      INFO:       1
+      VERSION:    1
+      PING:       1
+      EVENTS:     1
+      POST:       1   # write ops (create/start/stop/remove); Portainer is read-only without it
+      # Off by default — the primary container-escape vectors. Toggle in .env when needed:
+      EXEC:  ${PORTAINER_ENABLE_EXEC:-0}   # container console / attach
+      BUILD: ${PORTAINER_ENABLE_BUILD:-0}  # image builds from the UI
+      # Swarm API groups — only needed when managing a Swarm cluster:
+      SWARM:    ${PORTAINER_SWARM:-0}
+      NODES:    ${PORTAINER_SWARM:-0}
+      SERVICES: ${PORTAINER_SWARM:-0}
+      TASKS:    ${PORTAINER_SWARM:-0}
+      # SYSTEM stays 0 (blocks /system, prune, etc.)
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+    networks:
+      - portainer-net
+
+volumes:
+  portainer-data:
+
+networks:
+  portainer-net:
+    name: portainer-net
+    driver: bridge
