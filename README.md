@@ -10,6 +10,7 @@ the [infra-runner](https://github.com/uye-ltd/infra-runner) GitOps deployer.
 - [Prerequisites](#prerequisites)
 - [First-time server setup](#first-time-server-setup)
 - [Connecting the CI/CD pipeline](#connecting-the-cicd-pipeline)
+- [Verifying a deployment](#verifying-a-deployment)
 - [Accessing the UI](#accessing-the-ui)
 - [Customization & extension](#customization--extension)
 - [Upgrading](#upgrading)
@@ -62,26 +63,47 @@ the [infra-runner](https://github.com/uye-ltd/infra-runner) GitOps deployer.
 
 ## First-time server setup
 
+Do this **first**: make the GHCR package public at
+`https://github.com/orgs/uye-ltd/packages/container/portainer/settings`. Everything below depends on
+it — the deployer authenticates to GitHub as an App, and App installation tokens cannot pull private
+GHCR packages.
+
+The clone must live at `/home/ghrunner/infra-portainer` and be owned by `ghrunner`. That path is
+load-bearing: infra-runner's `COMPOSE_FILE` refers to `../infra-portainer/...`, resolved relative to
+`/home/ghrunner/infra-runner`.
+
 ```bash
-# Option A — one-liner
+# Option A — one-liner, run as ghrunner
 curl -fsSL https://raw.githubusercontent.com/uye-ltd/infra-portainer/main/scripts/bootstrap.sh | bash
 
-# Option B — manual
-git clone https://github.com/uye-ltd/infra-portainer.git ~/infra-portainer
-cd ~/infra-portainer
-cp docker/.env.example docker/.env
-make up   # builds the wrapper image locally for the first run, starts portainer + portainer-proxy
+# Option B — manual, from any sudo-capable account
+sudo -u ghrunner git clone https://github.com/uye-ltd/infra-portainer.git /home/ghrunner/infra-portainer
+sudo -u ghrunner cp /home/ghrunner/infra-portainer/docker/.env.example \
+                    /home/ghrunner/infra-portainer/docker/.env
+
+sudo -u ghrunner bash -c 'cd /home/ghrunner/infra-portainer && \
+  docker compose -f docker/docker-compose.yml pull portainer && \
+  docker compose -f docker/docker-compose.yml up -d'
 ```
+
+Two things about that last command:
+
+- **`cd` goes inside the `sudo`.** `/home/ghrunner` is mode `750`, so your own user cannot traverse it,
+  and `sudo cd` fails with `sudo: 'cd': command not found` — `cd` is a shell builtin, not a binary.
+- **`pull` before `up`.** Without it, compose builds the wrapper locally from the `build:` key and tags
+  the result `ghcr.io/uye-ltd/portainer:latest`, so you'd be running an *unsigned* image. The whole
+  point of the wrapper is that the deployer verifies its cosign signature.
+
+This creates `portainer-net`, the `portainer-data` volume, and both containers. The deployer only ever
+runs `up -d --no-deps portainer`, so the proxy, network, and volume must already exist.
 
 Then:
 
-1. **Set the admin password.** Open a tunnel and create the admin user (see [Accessing the UI](#accessing-the-ui)).
+1. **Register with the deployer** — see below.
+2. **Set the admin password.** Open a tunnel and create the admin user (see [Accessing the UI](#accessing-the-ui)).
    The admin password is intentionally not pre-seeded (a bcrypt hash breaks compose interpolation, and a
    password-file bind mount would break under the deployer). If Portainer's initial-setup window times
-   out, run `docker restart portainer` and retry.
-2. **Register with the deployer** — see below.
-3. **Make the GHCR package public** once CI has pushed it (the deployer's GitHub-App token cannot pull
-   private packages): `https://github.com/orgs/uye-ltd/packages/container/portainer/settings`.
+   out, run `docker restart portainer` and retry promptly.
 
 **GitHub Secrets: none required for deployment.** CI's only credential is the automatic `GITHUB_TOKEN`.
 
@@ -95,20 +117,74 @@ CI (`.github/workflows/ci.yml`) has two jobs:
   fuse-overlayfs (`--isolation=chroot`), pushes `:latest` + `:<sha>` to GHCR, and **cosign-signs by
   digest** via keyless OIDC. All `uses:` are SHA-pinned.
 
-Register the plugin on the server by adding to **infra-runner's `.env`**:
+Both jobs may briefly sit at *"Waiting for a runner to pick up this job"* — hosted-runner provisioning
+for `validate`, and the warm self-hosted fleet for `build`. That resolves on its own.
+
+Register the plugin on the server by editing **infra-runner's `.env`**. `COMPOSE_FILE` is shared with
+`docker-compose.override.yml` and the vault overlay, so it must be **appended to, never replaced** —
+overwriting it silently unregisters the vault plugin.
 
 ```bash
-COMPOSE_FILE=docker-compose.yml:../infra-portainer/deploy/docker-compose.infra-runner.yml
-PORTAINER_DIR=/home/ghrunner/infra-portainer
-# Signing happens in ci.yml, so the identity ends in ci.yml — NOT deploy.yml.
-PORTAINER_CERT_IDENTITY=https://github.com/uye-ltd/infra-portainer/.github/workflows/ci.yml@refs/heads/main
+sudo -u ghrunner cp /home/ghrunner/infra-runner/.env /home/ghrunner/infra-runner/.env.bak
+
+# Appends the overlay to the existing COMPOSE_FILE line. Not idempotent — run once.
+sudo -u ghrunner sed -i \
+  's#^COMPOSE_FILE=.*#&:../infra-portainer/deploy/docker-compose.infra-runner.yml#' \
+  /home/ghrunner/infra-runner/.env
+
+sudo -u ghrunner bash -c 'printf "\nPORTAINER_DIR=/home/ghrunner/infra-portainer\nPORTAINER_CERT_IDENTITY=https://github.com/uye-ltd/infra-portainer/.github/workflows/ci.yml@refs/heads/main\n" >> /home/ghrunner/infra-runner/.env'
 ```
 
-then `docker compose up -d --no-deps deployer`. Because the deployer never `git pull`s the plugin
-checkout, keep the on-server clone current with a cron:
+Signing happens in `ci.yml`, so `PORTAINER_CERT_IDENTITY` ends in `ci.yml` — **not** `deploy.yml`.
+
+Check the result before recreating anything. Expect one `COMPOSE_FILE` line ending in the portainer
+overlay and still containing the override + vault entries, plus the two `PORTAINER_*` lines:
 
 ```bash
-(crontab -l 2>/dev/null; echo '*/5 * * * * git -C /home/ghrunner/infra-portainer pull --ff-only origin main') | crontab -
+sudo -u ghrunner grep -E '^COMPOSE_FILE|^PORTAINER_' /home/ghrunner/infra-runner/.env
+# COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:../infra-vault/docker-compose.infra-runner.yml:../infra-portainer/deploy/docker-compose.infra-runner.yml
+# PORTAINER_DIR=/home/ghrunner/infra-portainer
+# PORTAINER_CERT_IDENTITY=https://github.com/uye-ltd/infra-portainer/.github/workflows/ci.yml@refs/heads/main
+```
+
+Then recreate only the deployer:
+
+```bash
+sudo -u ghrunner bash -c 'cd /home/ghrunner/infra-runner && docker compose up -d --no-deps deployer'
+```
+
+Because the deployer never `git pull`s the plugin checkout, keep the on-server clone current with a cron:
+
+```bash
+sudo -u ghrunner bash -c "crontab -l 2>/dev/null; echo '*/5 * * * * git -C /home/ghrunner/infra-portainer pull --ff-only origin main'" | sudo -u ghrunner crontab -
+```
+
+## Verifying a deployment
+
+```bash
+# Both plugins mounted — portainer registered, vault survived the COMPOSE_FILE edit
+docker exec infra-runner-deployer-1 ls /plugins        # portainer.plugin  vault-unseal.plugin
+
+# Deployer is polling, with no pull or signature failures
+docker logs --since 5m infra-runner-deployer-1 | grep -iE 'portainer|pull failed|verification FAILED'
+#   want: "Checking plugin" plugin=portainer   — and nothing else
+
+# Stack is healthy and answering
+docker ps --filter name=portainer --format '{{.Names}}\t{{.Status}}'
+curl -sf http://127.0.0.1:9000/api/status              # {"Version":"2.27.9",...}
+
+# The running image is the one CI signed
+docker image inspect ghcr.io/uye-ltd/portainer:latest --format '{{join .RepoDigests " "}}'
+
+# Signature verifies. cosign is not on the host — borrow the deployer's copy.
+docker exec infra-runner-deployer-1 cosign verify \
+  --certificate-identity https://github.com/uye-ltd/infra-portainer/.github/workflows/ci.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/uye-ltd/portainer:latest
+
+# The socket-proxy really is gating the API: denied group vs. allowed group
+docker exec portainer wget -qSO- http://portainer-proxy:2375/swarm    2>&1 | head -1  # 403 Forbidden
+docker exec portainer wget -qSO- http://portainer-proxy:2375/networks 2>&1 | head -1  # 200 OK
 ```
 
 ## Accessing the UI
@@ -135,13 +211,17 @@ at `127.0.0.1:9000`.
   - `PORTAINER_SWARM` — enable the Swarm API groups when managing a cluster.
   - `PORTAINER_EXTRA_ARGS` — extra Portainer flags (edge, logging, custom logout hostname, …).
 - **Baked-in changes** — extend `docker/portainer/Dockerfile` (COPY UI assets, add binaries) then push;
-  the signed image updates automatically.
+  the signed image updates automatically. Keep the base image registry-qualified
+  (`docker.io/portainer/portainer-ce:…`) — see [Troubleshooting](#troubleshooting).
+- **Local development** — `make up` / `make build` build the wrapper from source, which is the point
+  locally. Never do this on the server; it produces an unsigned image under the GHCR tag.
 - **Post-deploy hook** — for API-driven provisioning (endpoints/stacks), add a
   `PLUGIN_POST_DEPLOY_*` entry to `deploy/.infra-runner.plugin` (see `infra-runner/deployer/PLUGINS.md`).
 
 ## Upgrading
 
-Bump the base tag in `docker/portainer/Dockerfile` (`FROM portainer/portainer-ce:<new>`) and push.
+Bump the base tag in `docker/portainer/Dockerfile` (`FROM docker.io/portainer/portainer-ce:<new>` —
+keep the registry prefix) and push.
 CI rebuilds + signs; the deployer pulls the new digest and recreates the container.
 
 ## Troubleshooting
@@ -156,3 +236,28 @@ CI rebuilds + signs; the deployer pulls the new digest and recreates the contain
   `deploy.yml`).
 - **Changes to compose/.env/plugin not taking effect** — the deployer only updates the *image*. Pull
   the on-server clone (or wait for the cron) so compose/env/descriptor changes land.
+- **CI: `short-name "portainer/portainer-ce:…" did not resolve to an alias and no unqualified-search
+  registries are defined`** — Buildah, unlike Docker, will not guess a registry. It resolves short
+  names only from the `containers-common` alias table (`alpine` is in it; namespaced third-party
+  images are not). Fully qualify the base image: `FROM docker.io/portainer/portainer-ce:…`.
+- **`cd: /home/ghrunner/infra-portainer: Permission denied`, and `sudo cd` says `'cd': command not
+  found`** — `/home/ghrunner` is mode `750`, and `cd` is a shell builtin rather than a binary, so
+  `sudo` cannot run it. Put the `cd` inside a `ghrunner` shell:
+  `sudo -u ghrunner bash -c 'cd /home/ghrunner/infra-portainer && …'`.
+- **Recreating the deployer fails with `invalid spec: :/workspace-portainer:ro: empty section between
+  colons`** (plus `WARN The "PORTAINER_DIR" variable is not set`) — `PORTAINER_DIR` is missing from
+  infra-runner's `.env`, so the overlay's bind mount expands to an empty source. Add it and retry;
+  don't force it, as a blank value would mount the wrong path.
+- **Checking whether the GHCR package is really public** — query the registry directly. Buildah pushes
+  a single-arch **OCI image manifest**, so a probe that only offers the *index* media types comes back
+  `MANIFEST_UNKNOWN` and looks private when it isn't. Ask for the image-manifest type and expect `200`
+  (a private package gives `403`):
+
+  ```bash
+  TOK=$(curl -s 'https://ghcr.io/token?scope=repository:uye-ltd/portainer:pull&service=ghcr.io' \
+        | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  curl -s -o /dev/null -w '%{http_code}\n' \
+    -H "Authorization: Bearer $TOK" \
+    -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+    https://ghcr.io/v2/uye-ltd/portainer/manifests/latest
+  ```

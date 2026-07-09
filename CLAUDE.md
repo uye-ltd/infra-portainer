@@ -15,11 +15,23 @@ it, and the infra-runner plugin descriptor.
     Talks to Docker via `-H tcp://portainer-proxy:2375`. UI bound to `127.0.0.1:9000`.
   - `portainer-proxy` — `tecnativa/docker-socket-proxy` (pinned by digest), the only thing that
     mounts `/var/run/docker.sock`.
-- `docker/portainer/Dockerfile` — `FROM portainer/portainer-ce:<tag>-alpine`, wrapper/extension point.
+- `docker/portainer/Dockerfile` — `FROM docker.io/portainer/portainer-ce:<tag>-alpine`, wrapper/extension point.
 - `docker/portainer/templates/templates.json` — custom App Templates, served via `PORTAINER_TEMPLATES_URL`.
 - `deploy/.infra-runner.plugin` + `deploy/docker-compose.infra-runner.yml` — register with the deployer.
+  The overlay mounts the descriptor to `/plugins/portainer.plugin` inside the deployer container.
 - `.github/workflows/ci.yml` — `validate` (compose + JSON) and `build` (Buildah + cosign, self-hosted).
+  `validate` runs on GitHub-hosted runners (free — this repo is public); `build` waits for the
+  org-level self-hosted fleet that infra-runner's controller keeps warm. A transient
+  "Waiting for a runner to pick up this job" on either is normal.
 - `scripts/bootstrap.sh`, `Makefile` — server bootstrap and local ops.
+
+## Server layout
+
+The on-server clone **must** live at `/home/ghrunner/infra-portainer`, owned by `ghrunner`:
+infra-runner's `COMPOSE_FILE` refers to `../infra-portainer/deploy/docker-compose.infra-runner.yml`,
+resolved relative to its own project dir `/home/ghrunner/infra-runner`. `/home/ghrunner` is mode `750`,
+so other users cannot `cd` into it — and `sudo cd` cannot work, because `cd` is a shell builtin. Run
+`sudo -u ghrunner bash -c 'cd … && …'` instead.
 
 ## Common commands
 
@@ -36,7 +48,7 @@ make tunnel HOST=user@server   # print SSH tunnel command for the localhost UI
 
 - **Wrapper image for signing.** The deployer only pulls images whose cosign identity matches this
   repo's CI workflow, so upstream `portainer/portainer-ce` can't flow through it directly. We rebuild
-  it (`FROM portainer/portainer-ce`) and sign in `ci.yml`. Hence `PLUGIN_CERT_IDENTITY` ends in
+  it (`FROM docker.io/portainer/portainer-ce`) and sign in `ci.yml`. Hence `PLUGIN_CERT_IDENTITY` ends in
   `ci.yml@refs/heads/main`, not `deploy.yml`.
 - **`portainer` service must have NO host bind mounts.** The deployer runs
   `docker compose --project-directory docker up -d --no-deps portainer`; relative bind paths would
@@ -53,7 +65,14 @@ make tunnel HOST=user@server   # print SSH tunnel command for the localhost UI
   `portainer/portainer-ce`. CI builds with Buildah, which only resolves short names that appear in
   the `containers-common` shortname alias table (`alpine` is there; namespaced third-party images
   are not).
-- **GHCR package must be public** — the deployer's GitHub-App token cannot pull private packages.
+- **The server pulls; it never builds.** Bootstrap with `docker compose pull portainer` before `up -d`.
+  The `build:` key exists for local development only — using it on the server would run an unsigned
+  local image under the `ghcr.io/uye-ltd/portainer:latest` tag, defeating the signature check.
+- **`COMPOSE_FILE` in infra-runner's `.env` is append-only.** It is shared with
+  `docker-compose.override.yml` and the vault overlay. Overwriting it silently unregisters the vault
+  plugin. Append `:../infra-portainer/deploy/docker-compose.infra-runner.yml` to the existing value.
+- **GHCR package must be public** — the deployer's GitHub-App token cannot pull private packages
+  (`infra-runner/deployer/entrypoint.sh` skips GHCR login entirely on the App path).
 
 ## GitHub Actions secrets required
 

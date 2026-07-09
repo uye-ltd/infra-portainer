@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # First-time server setup. Run once on a fresh machine.
 #
+# Run this AS THE ghrunner USER, so INSTALL_DIR lands at /home/ghrunner/infra-portainer.
+# That path is load-bearing: infra-runner's COMPOSE_FILE refers to ../infra-portainer/...,
+# resolved relative to its own project dir /home/ghrunner/infra-runner.
+#
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/uye-ltd/infra-portainer/main/scripts/bootstrap.sh | bash
 #   or: bash scripts/bootstrap.sh
@@ -54,8 +58,27 @@ if [ ! -f docker/.env ]; then
   step "Created docker/.env from template"
 fi
 
-step "Starting containers (building the portainer image locally for first run)..."
-docker compose -f docker/docker-compose.yml up -d --build
+# Pull the cosign-signed image rather than building from the `build:` key — a local build would be
+# unsigned yet carry the ghcr.io/uye-ltd/portainer:latest tag, defeating the deployer's signature check.
+# Requires the GHCR package to be public; see the next-steps box below.
+step "Pulling the signed portainer image..."
+if ! docker compose -f docker/docker-compose.yml pull portainer; then
+  echo ""
+  echo "Error: could not pull ghcr.io/uye-ltd/portainer:latest."
+  echo ""
+  echo "  Most likely the GHCR package is still private. Make it public:"
+  echo "    https://github.com/orgs/uye-ltd/packages/container/portainer/settings"
+  echo ""
+  echo "  The deployer authenticates as a GitHub App, and App installation tokens"
+  echo "  cannot pull private GHCR packages — so this is required, not optional."
+  echo ""
+  echo "  (Also confirm CI has pushed the image at least once.)"
+  echo ""
+  exit 1
+fi
+
+step "Starting containers (portainer + portainer-proxy, network, volume)..."
+docker compose -f docker/docker-compose.yml up -d
 
 echo ""
 box "================================================================"
@@ -67,18 +90,23 @@ echo "       ssh -L 9000:127.0.0.1:9000 <user>@<server>"
 echo "       → browse http://localhost:9000 and create the admin user"
 echo "     (If the initial-setup window times out: 'docker restart portainer' and retry.)"
 echo ""
-echo "  2. Register with the infra-runner deployer. In infra-runner's .env add:"
-echo "       COMPOSE_FILE=docker-compose.yml:../infra-portainer/deploy/docker-compose.infra-runner.yml"
+echo "  2. Register with the infra-runner deployer. In infra-runner's .env:"
+echo ""
+echo "     APPEND this to the EXISTING COMPOSE_FILE value — do not replace it. The line is"
+echo "     shared with docker-compose.override.yml and the vault overlay, and overwriting it"
+echo "     silently unregisters the vault plugin:"
+echo "       :../infra-portainer/deploy/docker-compose.infra-runner.yml"
+echo ""
+echo "     Then add these two new lines:"
 echo "       PORTAINER_DIR=$INSTALL_DIR"
 echo "       PORTAINER_CERT_IDENTITY=https://github.com/uye-ltd/infra-portainer/.github/workflows/ci.yml@refs/heads/main"
-echo "     then:  docker compose up -d --no-deps deployer"
+echo ""
+echo "     Check it, then recreate only the deployer:"
+echo "       grep -E '^COMPOSE_FILE|^PORTAINER_' .env"
+echo "       docker compose up -d --no-deps deployer"
 echo ""
 echo "  3. Keep the on-server clone current (the deployer never git-pulls it):"
 echo "       (crontab -l 2>/dev/null; echo '*/5 * * * * git -C $INSTALL_DIR pull --ff-only origin main') | crontab -"
-echo ""
-echo "  4. Make the GHCR 'portainer' package PUBLIC once CI has pushed it, so the"
-echo "     deployer's GitHub-App token can pull it:"
-echo "       https://github.com/orgs/uye-ltd/packages/container/portainer/settings"
 echo ""
 echo "  After that, every push to main rebuilds, signs, and auto-deploys — no SSH needed."
 echo ""
