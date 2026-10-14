@@ -78,3 +78,7 @@ networks:
   portainer-net:
     name: portainer-net
     driver: bridge
+    # Keep Portainer outside infra-runner's 10.89.0.0/16 job network range.
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
