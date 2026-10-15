@@ -8,6 +8,10 @@ on:
       - 'docker/**'
       - '.github/workflows/**'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && 'publish' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -60,17 +64,42 @@ jobs:
           IMAGE=ghcr.io/uye-ltd/portainer
           buildah build \
             --file docker/portainer/Dockerfile \
-            --tag "${IMAGE}:latest" \
             --tag "${IMAGE}:${{ github.sha }}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --isolation=chroot \
             docker/portainer
-          buildah push --digestfile /tmp/digest.txt "${IMAGE}:latest"
-          buildah push "${IMAGE}:${{ github.sha }}"
+          buildah push --digestfile /tmp/digest.txt "${IMAGE}:${{ github.sha }}"
           echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Sign image
         run: |
           cosign sign --yes \
-            --registry-username "${{ github.actor }}" \
-            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
             "ghcr.io/uye-ltd/portainer@${{ steps.build.outputs.digest }}"
+
+  promote:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/uye-ltd/portainer
+    steps:
+      - uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+        with:
+          cosign-release: 'v2.2.4'
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote signed digest
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml@refs/heads/main"
+          verified=$(cosign verify --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${IMAGE}:${GITHUB_SHA}")
+          digest=$(jq -er '[.[].critical.image."docker-manifest-digest"] | unique | if length == 1 then .[0] else empty end' <<< "$verified")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools create --prefer-index=false --metadata-file /tmp/promoted.json --tag "${IMAGE}:latest" "${IMAGE}@${digest}"
+          test "$(jq -r '."containerimage.descriptor".digest' /tmp/promoted.json)" = "$digest"
