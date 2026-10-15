@@ -71,10 +71,12 @@ jobs:
           buildah push --digestfile /tmp/digest.txt "${IMAGE}:${{ github.sha }}"
           echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
 
+      - uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+        with:
+          cosign-release: 'v2.6.5'
       - name: Sign image
         run: |
-          # The host verifier and promotion job read the legacy OCI signature tag.
-          cosign sign --yes --new-bundle-format=false \
+          cosign sign --yes \
             "ghcr.io/uye-ltd/portainer@${{ steps.build.outputs.digest }}"
 
   promote:
@@ -89,7 +91,7 @@ jobs:
     steps:
       - uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
         with:
-          cosign-release: 'v2.2.4'
+          cosign-release: 'v2.6.5'
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           registry: ghcr.io
