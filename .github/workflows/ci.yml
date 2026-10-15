@@ -73,7 +73,8 @@ jobs:
 
       - name: Sign image
         run: |
-          cosign sign --yes \
+          # The host verifier and promotion job read the legacy OCI signature tag.
+          cosign sign --yes --new-bundle-format=false \
             "ghcr.io/uye-ltd/portainer@${{ steps.build.outputs.digest }}"
 
   promote:
