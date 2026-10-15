@@ -71,12 +71,9 @@ jobs:
           buildah push --digestfile /tmp/digest.txt "${IMAGE}:${{ github.sha }}"
           echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
 
-      - uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
-        with:
-          cosign-release: 'v2.6.5'
       - name: Sign image
         run: |
-          cosign sign --yes \
+          cosign sign --yes --new-bundle-format=false --use-signing-config=false \
             "ghcr.io/uye-ltd/portainer@${{ steps.build.outputs.digest }}"
 
   promote:
